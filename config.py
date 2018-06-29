@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
 # @Author: yooongchun
-# @File: confignfi.py
+# @File: config.py
 # @Time: 2018/6/19
 # @Contact: yooongchun@foxmail.com
 # @blog: https://blog.csdn.net/zyc121561
@@ -11,6 +11,8 @@ import logging.handlers
 
 
 class CONFIG(object):
+    '''控制信息打印级别和位置'''
+
     def __init__(self, to_file=False, level="info", file_path="blogger.log"):
         if level == "FATAL":
             logging_level = logging.FATAL
@@ -35,4 +37,5 @@ class CONFIG(object):
 
 
 def config():
+    '''在此处设置打印配置信息'''
     CONFIG(to_file=False, level="INFO", file_path="blogger.log")
