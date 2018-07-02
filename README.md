@@ -53,7 +53,7 @@
 
       ```python
       from UA import FakeUserAgent
-      headers=FakeUserAgent().get_random_headers()
+      headers=FakeUserAgent().random_headers()
       ```
 
     - `ProxyIP` 模块是程序的核心模块，包含了两个类，`Crawl` 类用来抓取IP，使用多线程模式抓取，`Validation` 类用来校验IP，其中`multiple_filter` 函数用来从`all_ip_table` 中筛选有效IP，而`multiple_validation` 用来从`ip_table`中定时校验IP，无效删除，启用该模块即可运行抓取和校验进程，用法：
@@ -61,20 +61,20 @@
       启动main函数即可启用抓取进程和验证进程（双进程模式）。
 
       ```python
-      mian()
+      main()
       ```
 
       如果只想启用抓取IP的进程，则运行:
 
       ```python
-      crawl=Crawl(database_name, valid_ip_table_name, all_ip_table_name)
+      crawl=Crawl()
       crawl.run()
       ```
 
       如果只想启用验证进程，则运行：
 
       ```python
-      validation=Validation(database_name, valid_ip_table_name,all_ip_table_name)
+      validation=Validation()
       validation.run()
       ```
 

@@ -12,7 +12,6 @@ import re
 import random
 import time
 from bs4 import BeautifulSoup
-from datetime import datetime
 import threading
 from multiprocessing import Process
 from database import IP_Pool
@@ -25,11 +24,19 @@ config.config()
 class Crawl(object):
     '''抓取网页内容获取IP地址保存到数据库中'''
 
-    def __init__(self, database_name, valid_ip_table_name, all_ip_table_name):
-        self.__URLs = self.__URL()
-        self.__ALL_IP_TABLE_NAME = all_ip_table_name
-        self.__VALID_IP_TABLE_NAME = valid_ip_table_name
-        self.__DATABASE_NAME = database_name
+    def __init__(self,
+                 retry_times=10,
+                 proxy_flag=False,
+                 proxy_database=None,
+                 proxy_table=None,
+                 database_name="ALL_IP.db"):
+        self.__URLs = self.__URL()  # 访问的URL列表
+        self.__ALL_IP_TABLE_NAME = "all_ip_table"  # 数据库表名称
+        self.__DATABASE_NAME = database_name  # 数据库名称
+        self.__RETRY_TIMES = retry_times  # 数据库访问重试次数
+        self.__PROXIES_FLAG = proxy_flag  # 是否使用代理访问
+        self.__PROXY_DATABASE = proxy_database  # 代理访问的IP数据库
+        self.__PROXY_TABLE = proxy_table  # 代理访问的IP数据库表
 
     def __URL(self):
         '''
@@ -46,7 +53,10 @@ class Crawl(object):
         9.全网代理网站
         '''
         URL = []
-        url_xici = ["http://www.xicidaili.com"]
+        url_xici = [
+            "http://www.xicidaili.com/nn/%d" % (index + 1)
+            for index in range(3275)
+        ]
         url_kuaidaili = [
             "https://www.kuaidaili.com/free/inha/%d" % (index + 1)
             for index in range(2367)
@@ -75,25 +85,21 @@ class Crawl(object):
         random.shuffle(URL)  # 随机打乱
         return URL
 
-    def __proxies(self):
-        '''构造代理IP'''
-        ip = IP_Pool(self.__DATABASE_NAME,
-                     self.__VALID_IP_TABLE_NAME).pull(random_flag=True)
-        if ip is not None:
+    def __proxies(self, database_name, table_name):
+        '''构造代理IP,需要提供代理IP保存的数据库名称和表名'''
+        ip = IP_Pool(database_name, table_name).pull(
+            random_flag=True, re_try_times=self.__RETRY_TIMES)
+        if ip:
             IP = str(ip[0]) + ":" + str(ip[1])
             return {"http": "http://" + IP}
         else:
-            return None
+            return False
 
-    def __crawl(self, url, re_conn_times=3):
+    def __crawl(self, url, headers, proxies=False, re_conn_times=3):
         '''爬取url'''
-        headers = FakeUserAgent().get_random_headers()
-        cnt = 0
-        while cnt < re_conn_times:
-            cnt += 1
+        for cnt in range(re_conn_times):
             try:
-                proxies = self.__proxies()
-                if proxies is None:
+                if not proxies:
                     response = requests.get(
                         url=url, headers=headers, timeout=5)
                 else:
@@ -101,94 +107,107 @@ class Crawl(object):
                         url=url, headers=headers, proxies=proxies, timeout=5)
                 break
             except Exception:
-                logging.debug("第{}次网络连接出错,重试!".format(cnt))
                 response = None
+                continue
         if response is None:
-            logging.error("当前网络不可用，请检查网络连接后重试！")
-            return None
-        if not int(response.status_code) == 200:
-            logging.error("响应出错，退出！")
+            logging.error(u"ProxyIP-Crawl:请求url出错：%s" % url)
             return None
         try:
             html = response.content.decode("utf-8")
+            return html
         except Exception:
-            try:
-                html = response.content.decode("gbk")
-            except Exception:
-                logging.error("解码出错！")
-                return None
-        return html
+            logging.error(u"ProxyIP-Crawl:HTML UTF-8解码失败，尝试GBK解码...")
+        try:
+            html = response.content.decode("gbk")
+            return html
+        except Exception:
+            logging.error(u"ProxyIP-Crawl:HTML解码出错，跳过！")
+            return None
 
-    def __parse(self, url):
-        '''解析HTML获取IP地址并保存到数据库中'''
-        html = self.__crawl(url)
+    def __parse(self, html):
+        '''解析HTML获取IP地址'''
         if html is None:
-            logging.debug("抓取失败！")
             return
         all_ip = []
-        try:
-            soup = BeautifulSoup(html, "lxml")
-            tds = soup.find_all("td")
-            for index, td in enumerate(tds):
-                logging.debug("当前页面处理进度：{}/{}".format(index + 1, len(tds)))
-                if re.match(r"^\d+\.\d+\.\d+\.\d+$",
-                            re.sub(r"\s+|\n+|\t+", "", td.text)):
-                    item = []
-                    item.append(re.sub(r"\s+|\n+|\t+", "", td.text))
-                    item.append(
-                        re.sub(r"\s+|\n+|\t+", "", tds[index + 1].text))
-                    item.append(
-                        re.sub(r"\s+|\n+|\t+", "", tds[index + 2].text))
-                    item.append(
-                        re.sub(r"\s+|\n+|\t+", "", tds[index + 3].text))
-                    item.append(
-                        re.sub(r"\s+|\n+|\t+", "", tds[index + 4].text))
-                    all_ip.append(item)
-        except Exception:
-            logging.error("解析html出错,返回！")
-            return
-        if len(all_ip) > 0:
-            IP_Pool(self.__DATABASE_NAME,
-                    self.__ALL_IP_TABLE_NAME).push(all_ip)
+        soup = BeautifulSoup(html, "lxml")
+        tds = soup.find_all("td")
+        for index, td in enumerate(tds):
+            logging.debug(u"ProxyIP-Crawl:页面处理进度：{}/{}".format(
+                index + 1, len(tds)))
+            if re.match(r"^\d+\.\d+\.\d+\.\d+$",
+                        re.sub(r"\s+|\n+|\t+", "", td.text)):
+                item = []
+                item.append(re.sub(r"\s+|\n+|\t+", "", td.text))
+                item.append(re.sub(r"\s+|\n+|\t+", "", tds[index + 1].text))
+                item.append(re.sub(r"\s+|\n+|\t+", "", tds[index + 2].text))
+                item.append(re.sub(r"\s+|\n+|\t+", "", tds[index + 3].text))
+                item.append(re.sub(r"\s+|\n+|\t+", "", tds[index + 4].text))
+                all_ip.append(item)
+            else:
+                logging.debug(u"不匹配的项！")
+        return all_ip
 
-    def multiple_crawl(self, thread_num=10, sleep_time=60 * 60):
+    def crawl(self, url, headers, proxies):
+        '''抓取IP并保存'''
+        html = self.__crawl(url, headers, proxies=proxies)
+        if html is None:
+            return
+        ip = self.__parse(html)
+        if ip is None or len(ip) < 1:
+            return
+        if len(ip) == 1:
+            IP_Pool(self.__DATABASE_NAME, self.__ALL_IP_TABLE_NAME).push([ip])
+        else:
+            IP_Pool(self.__DATABASE_NAME, self.__ALL_IP_TABLE_NAME).push(ip)
+
+    def multiple_crawl(self, thread_num=10, sleep_time=15 * 60):
         '''多线程抓取'''
         count = 0
         while True:
             count += 1
-            logging.info(u"{}\t开始第{}轮抓取,当前url数：{}".format(
-                datetime.now(), count, len(self.__URLs)))
+            logging.info(u"ProxyIP-Crawl:开始第{}轮抓取,当前url数：{}".format(
+                count, len(self.__URLs)))
             IP_NUM_A = len(
-                IP_Pool(self.__DATABASE_NAME, self.__ALL_IP_TABLE_NAME).pull())
+                IP_Pool(self.__DATABASE_NAME, self.__ALL_IP_TABLE_NAME).pull(
+                    re_try_times=self.__RETRY_TIMES))
             cnt = 0
             st = time.time()
             while cnt < len(self.__URLs):
                 pool = []
+                if self.__PROXIES_FLAG:
+                    proxies = self.__proxies(self.__PROXY_DATABASE,
+                                             self.__PROXY_TABLE)
+                else:
+                    proxies = False
                 for i in range(thread_num):
                     if cnt >= len(self.__URLs):
                         break
                     url = self.__URLs[cnt]
-                    th = threading.Thread(target=self.__parse, args=(url, ))
+                    headers = FakeUserAgent().random_headers()
+                    th = threading.Thread(
+                        target=self.crawl, args=(url, headers, proxies))
                     pool.append(th)
-                    logging.info(u"{}\t 抓取URL：{}\t 当前进度：{}/{}\t{:.2f}%".format(
-                        datetime.now(), url, cnt + 1, len(self.__URLs),
-                        (cnt + 1) / len(self.__URLs) * 100))
+                    logging.info(
+                        u"ProxyIP-Crawl:抓取URL：{}\t 进度：{}/{}\t{:.2f}%".format(
+                            url, cnt + 1, len(self.__URLs),
+                            (cnt + 1) / len(self.__URLs) * 100))
                     th.start()
-                    time.sleep(random.random())  # 随机休眠，均值：0.5秒
+                    time.sleep(2 * random.random())  # 随机休眠，均值：0.5秒
                     cnt += 1
                 for th in pool:
                     th.join()
             ed = time.time()
             IP_NUM_B = len(
-                IP_Pool(self.__DATABASE_NAME, self.__ALL_IP_TABLE_NAME).pull())
+                IP_Pool(self.__DATABASE_NAME, self.__ALL_IP_TABLE_NAME).pull(
+                    re_try_times=self.__RETRY_TIMES))
             logging.info(
-                "{}\t第{}轮抓取完成,耗时：{:.2f}秒，共计抓取到IP：{}条，当前IP池中IP数：{}条".format(
-                    datetime.now(), count, ed - st, IP_NUM_B - IP_NUM_A,
-                    IP_NUM_B))
+                u"ProxyIP-Crawl:第{}轮抓取完成,耗时：{:.2f}秒，共计抓取到IP：{}条，当前IP池中IP数：{}条".
+                format(count, ed - st, IP_NUM_B - IP_NUM_A, IP_NUM_B))
             st = time.time()
             while time.time() - st < sleep_time:
-                logging.info(u"{}\t休眠等待：{:.2f}秒".format(
-                    datetime.now(), sleep_time - time.time() + st))
+                logging.info(
+                    u"ProxyIP-Crawl:休眠等待：{:.2f}秒".format(sleep_time -
+                                                         time.time() + st))
                 time.sleep(5)
 
     def run(self):
@@ -198,19 +217,21 @@ class Crawl(object):
 class Validation(object):
     '''校验IP有效性'''
 
-    def __init__(self, database_name, valid_ip_table_name, all_ip_table_name):
+    def __init__(self, all_ip_database="ALL_IP.db", ip_database="IP.db"):
         self.__URL = "http://httpbin.org/get"
-        self.__VALID_IP_TABLE_NAME = valid_ip_table_name
-        self.__ALL_IP_TABLE_NAME = all_ip_table_name
-        self.__DATABASE_NAME = database_name
+        self.__VALID_IP_TABLE_NAME = "ip_table"
+        self.__ALL_IP_TABLE_NAME = "all_ip_table"
+        self.__ALL_IP_DATABASE = all_ip_database
+        self.__IP_DATABASE = ip_database
+        self.__RETRY_TIMES = 10  # 数据库访问重试次数
 
     def __check_ip_anonumous(self, ip):
         '''检验IP是否高匿名'''
-        logging.info(u"校验IP是否高匿：{}".format(ip[0]))
+        logging.info(u"ProxyIP-Validation:校验IP是否高匿：{}".format(ip[0]))
         if "高匿" in str(ip):
             return True
         else:
-            logging.debug("非高匿IP：{}".format(ip[0]))
+            logging.debug(u"ProxyIP-Validation:非高匿IP：{}".format(ip[0]))
             return False
 
     def __check_ip_validation(self, ip):
@@ -218,112 +239,115 @@ class Validation(object):
         try:
             IP = str(ip[0]) + ":" + str(ip[1])
         except Exception:
-            logging.info(u"IP地址格式不正确!")
-            return None
+            logging.info(u"ProxyIP-Validation:IP地址格式不正确!")
+            return False
         re_conn_time = 2
-        cnt = 0
-        while cnt < re_conn_time:
-            cnt += 1
+        logging.info(u"ProxyIP-Validation:校验IP地址有效性：{}".format(IP))
+        proxies = {"http": "http://" + IP}
+        headers = FakeUserAgent().random_headers()
+        for i in range(re_conn_time):
             try:
-                logging.info(u"校验IP地址有效性：{}".format(IP))
-                proxies = {"http": "http://" + IP}
                 response = requests.get(
                     url=self.__URL,
-                    headers=FakeUserAgent().get_random_headers(),
                     proxies=proxies,
+                    headers=headers,
                     timeout=5)
+                break
             except Exception:
-                time.sleep(2 * random.random())
                 response = None
+                continue
         if response is None:
-            logging.info(u"网络错误！")
-            return
-        if int(response.status_code) == 200 and IP.split(
-                ":")[0] in response.text:
-            logging.info(u"有效IP：{}".format(IP))
-            return True
-        else:
-            logging.debug("无效IP：{}".format(IP))
+            logging.error(u"ProxyIP-Validation:请求校验IP的网络错误！")
             return False
+        return True
 
     def __filter_ip(self, ip):
         '''验证数据库中的IP地址是否有效,校验后删除'''
         if self.__check_ip_validation(ip) and self.__check_ip_anonumous(ip):
-            IP_Pool(self.__DATABASE_NAME,
-                    self.__VALID_IP_TABLE_NAME).push([ip])
-        IP_Pool(self.__DATABASE_NAME, self.__ALL_IP_TABLE_NAME).delete(ip)
+            IP_Pool(self.__IP_DATABASE, self.__VALID_IP_TABLE_NAME).push(
+                [ip], re_try_times=self.__RETRY_TIMES)
+        # 校验后删除
+        IP_Pool(self.__ALL_IP_DATABASE, self.__ALL_IP_TABLE_NAME).delete(
+            IP=ip, re_try_times=self.__RETRY_TIMES)
 
-    def multiple_filter(self, thread_num=50, sleep=15 * 60):
+    def multiple_filter(self, thread_num=10, sleep=15 * 60):
         '''多线程验证'''
-        IPs = IP_Pool(self.__DATABASE_NAME, self.__ALL_IP_TABLE_NAME).pull()
+        IPs = IP_Pool(
+            self.__ALL_IP_DATABASE,
+            self.__ALL_IP_TABLE_NAME).pull(re_try_times=self.__RETRY_TIMES)
         count = 0
         while True:
             count += 1
             st = time.time()
-            logging.info(u"{}\t 第{}轮验证开始，共计需验证IP:{} 条".format(
-                datetime.now(), count, len(IPs)))
+            logging.info(u"ProxyIP-Validation:第{}轮验证开始，共计需验证IP:{} 条".format(
+                count, len(IPs)))
             cnt = 0
             while cnt < len(IPs):
                 pool = []
                 for i in range(thread_num):
                     if cnt >= len(IPs):
                         break
-                    logging.info(u"当前校验进度：{}/{}\t{:.2f}%".format(
-                        cnt, len(IPs), cnt / len(IPs) * 100))
+                    logging.info(
+                        u"ProxyIP-Validation:校验进度：{}/{}\t{:.2f}%".format(
+                            cnt, len(IPs), cnt / len(IPs) * 100))
                     th = threading.Thread(
                         target=self.__filter_ip, args=(IPs[cnt], ))
                     th.start()
-                    time.sleep(random.random())
+                    time.sleep(2 * random.random())
                     pool.append(th)
                     cnt += 1
                 for th in pool:
                     th.join()
             ed = time.time()
-            IP = IP_Pool(self.__DATABASE_NAME,
-                         self.__VALID_IP_TABLE_NAME).pull()
+            IP = IP_Pool(self.__IP_DATABASE, self.__VALID_IP_TABLE_NAME).pull(
+                re_try_times=self.__RETRY_TIMES)
             logging.info(
-                "{}\t 第{}轮验证结束，耗时：{:.2f}\t共计验证IP:{}条\t当前IP池中有效IP:{}条".format(
-                    datetime.now(), count, ed - st, len(IPs), len(IP)))
+                u"ProxyIP-Validation:第{}轮验证结束，耗时：{:.2f}\t共计验证IP:{}条\t当前IP池中有效IP:{}条".
+                format(count, ed - st, len(IPs), len(IP)))
             st = time.time()
             while time.time() - st < sleep:
-                logging.info(u"休眠倒计时：{:.2f}秒".format(sleep - time.time() + st))
+                logging.info(u"ProxyIP-Validation:休眠倒计时：{:.2f}秒".format(
+                    sleep - time.time() + st))
                 time.sleep(5)
 
     def __validation(self, ip):
         '''校验有效IP池中的IP有效性，无效则删除'''
         if not self.__check_ip_validation(ip):
-            IP_Pool(self.__DATABASE_NAME,
-                    self.__VALID_IP_TABLE_NAME).delete(ip)
+            IP_Pool(self.__IP_DATABASE, self.__VALID_IP_TABLE_NAME).delete(
+                IP=ip, re_try_times=self.__RETRY_TIMES)
 
     def multiple_validation(self, thread_num=20, sleep=15 * 60):
         '''定时校验有效IP池里的IP，无效的删除'''
-        IPs = IP_Pool(self.__DATABASE_NAME, self.__VALID_IP_TABLE_NAME).pull()
+        IPs = IP_Pool(
+            self.__IP_DATABASE,
+            self.__VALID_IP_TABLE_NAME).pull(re_try_times=self.__RETRY_TIMES)
         count = 0
         while True:
             count += 1
-            logging.info(u"{}\t 第{} 次校验，当前IP数：{}".format(
-                datetime.now(), count, len(IPs)))
+            logging.info(u"ProxyIP-Validation:第{}次校验，IP数：{}".format(
+                count, len(IPs)))
             cnt = 0
             while cnt < len(IPs):
                 pool = []
                 for i in range(thread_num):
                     if cnt >= len(IPs):
                         break
-                    logging.info(u"校验进度：{}/{}\t{:.2f}%".format(
-                        cnt, len(IPs), cnt / len(IPs) * 100))
+                    logging.info(
+                        u"ProxyIP-Validation:校验进度：{}/{}\t{:.2f}%".format(
+                            cnt, len(IPs), cnt / len(IPs) * 100))
                     th = threading.Thread(
                         target=self.__validation, args=(IPs[cnt], ))
                     th.start()
-                    time.sleep(random.random())
+                    time.sleep(2 * random.random())
                     pool.append(th)
                     cnt += 1
                 for th in pool:
                     th.join()
-            ips = IP_Pool(self.__DATABASE_NAME,
-                          self.__VALID_IP_TABLE_NAME).pull()
-            logging.info(u"{}\t 完成第{}次校验，当前有效IP数：{}".format(
-                datetime.now(), count, len(ips)))
-            logging.info(u"进入休眠：{} 秒".format(sleep))
+            ips = IP_Pool(self.__IP_DATABASE, self.__VALID_IP_TABLE_NAME).pull(
+                re_try_times=self.__RETRY_TIMES)
+            logging.info(u"ProxyIP-Validation:完成第{}次校验，当前有效IP数：{}".format(
+                count, len(ips)))
+            logging.info(u"ProxyIP-Validation:进入休眠：{} 秒".format(sleep))
             time.sleep(sleep)
 
     def run(self):
@@ -337,15 +361,11 @@ class Validation(object):
 
 
 def main():
-    database_name = "ProxyIP.db"
-    valid_ip_table_name = "ip_table"
-    all_ip_table_name = "all_ip_table"
-    p1 = Process(
-        target=Crawl(database_name, valid_ip_table_name, all_ip_table_name)
-        .run)
-    p2 = Process(
-        target=Validation(database_name, valid_ip_table_name,
-                          all_ip_table_name).run)
+    # 初始化
+    crawl = Crawl()
+    validation = Validation()
+    p1 = Process(target=crawl.run)
+    p2 = Process(target=validation.run)
     p1.start()
     p2.start()
     p1.join()
@@ -353,4 +373,6 @@ def main():
 
 
 if __name__ == "__main__":
+    # Crawl().run()
+    # Validation().run()
     main()

@@ -38,4 +38,4 @@ class CONFIG(object):
 
 def config():
     '''在此处设置打印配置信息'''
-    CONFIG(to_file=False, level="INFO", file_path="blogger.log")
+    CONFIG(to_file=True, level="ERROR", file_path="blogger.log")

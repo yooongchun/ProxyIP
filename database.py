@@ -25,18 +25,19 @@ class IP_Pool(object):
 
     def __push(self, IP_list):
         '''存储IP，传入一个列表，格式为[[IP,PORT,ADDRESS,TYPE,PROTOCOL],...]'''
-        logging.info(u"写入数据库表：%s..." % (self.__table_name))
+        logging.info(u"database-IP_Pool:写入数据库表：%s..." % (self.__table_name))
         try:
             conn = sqlite3.connect(self.__database_name, isolation_level=None)
             conn.execute(
                 "create table if not exists %s(IP CHAR(20) UNIQUE, PORT INTEGER,ADDRESS CHAR(50),TYPE CHAR(50),PROTOCOL CHAR(50))"
                 % self.__table_name)
         except Exception:
-            logging.error("连接数据库出错,退出：{}".format(self.__database_name))
+            logging.error(u"database-IP_Pool:连接数据库出错,退出：{}".format(
+                self.__database_name))
             return
         for one in IP_list:
             if len(one) < 5:
-                logging.error("IP格式不正确：{}，跳过！".format(one))
+                logging.error(u"database-IP_Pool:IP格式不正确：{}，跳过！".format(one))
                 continue
             conn.execute(
                 "insert or ignore into %s(IP,PORT,ADDRESS,TYPE,PROTOCOL) values (?,?,?,?,?)"
@@ -68,7 +69,8 @@ class IP_Pool(object):
                 "create table if not exists %s(IP CHAR(20) UNIQUE, PORT INTEGER,ADDRESS CHAR(50),TYPE CHAR(50),PROTOCOL CHAR(50))"
                 % self.__table_name)
         except Exception:
-            logging.error("连接数据库出错：{}".format(self.__database_name))
+            logging.error(u"database-IP_Pool:连接数据库出错：{}".format(
+                self.__database_name))
             return
         cur = conn.cursor()
         if random_flag:
@@ -105,22 +107,25 @@ class IP_Pool(object):
                 "create table if not exists %s(IP CHAR(20) UNIQUE, PORT INTEGER,ADDRESS CHAR(50),TYPE CHAR(50),PROTOCOL CHAR(50))"
                 % self.__table_name)
         except Exception:
-            logging.error("连接数据库出错：{}".format(self.__database_name))
+            logging.error(u"database-IP_Pool:连接数据库出错：{}".format(
+                self.__database_name))
             return
         cur = conn.cursor()
         if IP is not None:
-            logging.info(u"删除记录：{}\t{}".format(self.__table_name, IP[0]))
+            logging.info(u"database-IP_Pool:删除记录：{}\t{}".format(
+                self.__table_name, IP[0]))
             cur.execute("delete from %s where IP=?" % self.__table_name,
                         (IP[0], ))
         else:
-            logging.info(u"删除所有记录:{}".format(self.__table_name))
+            logging.info(u"database-IP_Pool:删除所有记录:{}".format(
+                self.__table_name))
             cur.execute("delete from %s" % self.__table_name)
         cur.close()
         conn.close()
 
     def delete(self, re_try_times=1, IP=None):
         '''删除数据从数据库，为应对多线程，多进程的并发访问，采用多次重试模式'''
-        if not isinstance(IP, list) or IP is not None:
+        if IP is None:
             return False
         if not isinstance(re_try_times, int) or re_try_times < 1:
             re_try_times = 1
@@ -134,5 +139,80 @@ class IP_Pool(object):
         return False
 
 
+class INFO_Pool(object):
+    """
+    存取博客文章统计数据的数据库
+    """
+
+    def __init__(self, database_name, table_name):
+        self.__table_name = table_name
+        self.__database_name = database_name
+
+    def push(self, info):
+        '''存储统计信息，传入一个列表，格式为[[TIME,TISTAMP,ARTICLE_NUM,TOTAL_VISIT],...]'''
+        logging.info(u"database-INFO_Pool:写入数据库表：%s..." % (self.__table_name))
+        try:
+            conn = sqlite3.connect(self.__database_name, isolation_level=None)
+            conn.execute(
+                "create table if not exists %s(TIME CHAR(50) UNIQUE,TIMESTAMP INTEGER,ARTICLE_NUM INTEGER,TOTAL_VISIT INTEGER)"
+                % self.__table_name)
+        except Exception:
+            logging.error(u"database-INFO_Pool:连接数据库出错,退出：{}".format(
+                self.__table_name))
+            return
+        for one in info:
+            conn.execute(
+                "insert or ignore into %s(TIME,TIMESTAMP,ARTICLE_NUM,TOTAL_VISIT) values (?,?,?,?)"
+                % (self.__table_name), (one[0], one[1], one[2], one[3]))
+        conn.commit()
+        conn.close()
+
+    def pull(self):
+        '''获取数据库内容，返回一个列表'''
+        try:
+            conn = sqlite3.connect(self.__database_name, isolation_level=None)
+            conn.execute(
+                "create table if not exists %s(TIME CHAR(50) UNIQUE,TIMESTAMP INTEGER,ARTICLE_NUM INTEGER,TOTAL_VISIT INTEGER)"
+                % self.__table_name)
+        except Exception:
+            logging.error(u"database-INFO_Pool:连接数据库出错：{}".format(
+                self.__table_name))
+            return
+        cur = conn.cursor()
+        cur.execute("select * from %s" % self.__table_name)
+        response = cur.fetchall()
+        cur.close()
+        conn.close()
+        return response
+
+    def delete(self, TIME=None):
+        '''删除指定的记录'''
+        try:
+            conn = sqlite3.connect(self.__database_name, isolation_level=None)
+            conn.execute(
+                "create table if not exists %s(TIME CHAR(50) UNIQUE,TIMESTAMP INTEGER,ARTICLE_NUM INTEGER,TOTAL_VISIT INTEGER)"
+                % self.__table_name)
+        except Exception:
+            logging.error(u"database-INFO_Pool:连接数据库出错：{}".format(
+                self.__table_name))
+            return
+        cur = conn.cursor()
+        if TIME is not None:
+            logging.info(u"database-INFO_Pool:删除记录：{}-{}".format(
+                self.__table_name, TIME))
+            cur.execute("delete from %s where TIME=?" % self.__table_name,
+                        (TIME, ))
+        else:
+            logging.info(u"database-INFO_Pool:删除所有记录:{}".format(
+                self.__table_name))
+            cur.execute("delete from %s" % self.__table_name)
+        cur.close()
+        conn.close()
+
+
 if __name__ == "__main__":
-    print(__doc__)
+    pool = INFO_Pool("IP.db", "ip_table")
+    for ip in pool.pull():
+        logging.info(ip)
+
+    print(len(pool.pull()))
